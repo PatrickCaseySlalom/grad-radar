@@ -1,0 +1,41 @@
+# Pump.fun radar settings. Every value is a starting hypothesis; tune after a week.
+grad_radar:
+  enabled: true
+
+  # ---- EARLY lane: pre-graduation, still on the bonding curve -------------
+  early_enabled: true
+  early_max_age_minutes: 120         # coin age since launch
+  early_min_market_cap: 8000         # USD
+  early_max_market_cap: 45000        # stay well below graduation
+  early_min_unique_buyers_h1: 60     # distinct wallets, not trade count
+  early_min_buyers_15m: 20           # demand still active right now
+  early_min_buyer_seller_ratio: 1.3
+  early_min_volume_h1: 5000
+  early_max_drop_5m_pct: -15
+  early_require_buyer_growth: true   # unique buyers rising scan over scan
+  early_max_top10_pct: 25            # stricter than graduated lane
+  early_max_single_holder_pct: 8
+  early_max_dev_pct: 5               # dev holding a big bag = dump risk
+  early_require_socials: false
+
+  # ---- GRADUATED lane: just moved to PumpSwap -----------------------------
+  max_minutes_since_graduation: 45
+  min_market_cap: 20000
+  max_market_cap: 150000
+  min_liquidity_usd: 8000
+  min_liquidity_to_mc: 0.10          # exit depth
+  min_buys_since_graduation: 150
+  min_buy_sell_ratio: 1.15
+  max_drop_5m_pct: -15
+  max_top10_pct: 30                  # excludes pools and AMMs
+  max_single_holder_pct: 10
+  min_lp_locked_pct: 90
+  require_socials: false
+
+  # ---- Shared RugCheck gates ----------------------------------------------
+  max_insider_wallets: 0
+  block_on_danger_risk: true
+  cluster_min_pct: 2.5               # similar-size holder cluster (possible bundle)
+  cluster_band_pct: 0.75
+  cluster_min_count: 4
+  block_on_cluster: false            # true = block instead of just flagging

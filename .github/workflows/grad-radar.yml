@@ -1,0 +1,54 @@
+name: Graduation radar
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"  # every 5 minutes (GitHub can delay runs at busy times)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "scan = normal run, test = send a test Telegram message"
+        type: choice
+        options: [scan, test]
+        default: scan
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grad-radar
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Remembers the watchlist and which coins already alerted, between runs
+      - uses: actions/cache@v4
+        with:
+          path: .radar
+          key: grad-${{ github.run_id }}
+          restore-keys: grad-
+
+      - name: Send test message
+        if: ${{ inputs.mode == 'test' }}
+        run: python -m pipeline.grad_radar --test-alert
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+      - name: Scan graduations and send alerts
+        if: ${{ inputs.mode != 'test' }}
+        run: python -m pipeline.grad_radar
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
