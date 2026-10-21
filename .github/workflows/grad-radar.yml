@@ -2,7 +2,9 @@ name: Graduation radar
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # every 5 minutes (GitHub can delay runs at busy times)
+    # GitHub fires schedules unreliably (often hours apart), so each run scans
+    # every 60s for ~5.5 hours and the schedule just keeps a run going.
+    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -21,7 +23,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +50,7 @@ jobs:
 
       - name: Scan graduations and send alerts
         if: ${{ inputs.mode != 'test' }}
-        run: python -m pipeline.grad_radar
+        run: python -m pipeline.grad_radar --loop 60 --max-minutes 330
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}

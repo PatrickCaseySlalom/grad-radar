@@ -104,16 +104,23 @@ def log(msg: str) -> None:
     print(f"[grad-radar {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def http_json(url: str, retries: int = 2, backoff: float = 6.0):
+class RateLimited(Exception):
+    pass
+
+
+def http_json(url: str, retries: int = 3, backoff: float = 10.0):
     for attempt in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers=UA)
             with urllib.request.urlopen(req, timeout=20) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < retries:
-                time.sleep(backoff * (attempt + 1))
-                continue
+            if e.code == 429:
+                if attempt < retries:
+                    wait = fnum(e.headers.get("Retry-After"), 0) or backoff * (attempt + 1)
+                    time.sleep(min(wait, 60))
+                    continue
+                raise RateLimited(url.split("?")[0])
             if e.code in (400, 404):
                 return None
             raise
@@ -178,8 +185,14 @@ def discover(cfg: dict, state: dict) -> None:
         f"{GECKO}/networks/solana/dexes/pumpswap/pools?page=2&sort=h24_volume_usd_desc",
     ]
     added = 0
+    skipped = 0
     for url in feeds:
-        data = http_json(url) or {}
+        try:
+            data = http_json(url) or {}
+        except RateLimited:
+            skipped += 1
+            time.sleep(15)
+            continue
         for pool in data.get("data", []):
             try:
                 dex = pool["relationships"]["dex"]["data"]["id"]
@@ -207,7 +220,8 @@ def discover(cfg: dict, state: dict) -> None:
     cutoff = now - cfg["watch_hours"] * 3600
     for mint in [m for m, w in state["watch"].items() if w["first_seen"] < cutoff]:
         state["watch"].pop(mint, None)
-    log(f"discovery: +{added} watched, {len(state['watch'])} on watchlist")
+    log(f"discovery: +{added} watched, {len(state['watch'])} on watchlist"
+        + (f" ({skipped} feed(s) rate-limited, skipped)" if skipped else ""))
 
 
 def _early_snapshot(a: dict, now: float) -> dict:
@@ -242,7 +256,10 @@ def dexscreener_pairs(mints: list[str]) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     for i in range(0, len(mints), 30):
         chunk = mints[i:i + 30]
-        data = http_json(f"{DEXS}/tokens/v1/solana/{','.join(chunk)}") or []
+        try:
+            data = http_json(f"{DEXS}/tokens/v1/solana/{','.join(chunk)}") or []
+        except RateLimited:
+            data = []
         for pair in data if isinstance(data, list) else []:
             mint = pair.get("baseToken", {}).get("address")
             if mint:
@@ -334,7 +351,10 @@ def rugcheck_gate(mint: str, cfg: dict, report: dict | None = None,
     max_top10 = cfg["early_max_top10_pct"] if early else cfg["max_top10_pct"]
     max_single = cfg["early_max_single_holder_pct"] if early else cfg["max_single_holder_pct"]
     if report is None:
-        report = http_json(f"{RUGCHECK}/tokens/{mint}/report")
+        try:
+            report = http_json(f"{RUGCHECK}/tokens/{mint}/report")
+        except RateLimited:
+            report = None
     if not report:
         return False, ["RugCheck report unavailable"], [], {}
 
@@ -549,6 +569,8 @@ def scan(cfg: dict, dry_run: bool = False) -> int:
                 state["watch"].pop(mint, None)
                 sent += 1
                 time.sleep(1.2 if not dry_run else 0)
+            elif res["status"] == "safety_fail" and res["reasons"] == ["RugCheck report unavailable"]:
+                continue  # temporary outage or rate limit: retry next scan
             elif res["status"] == "safety_fail":
                 state["blocked"][mint] = {"at": now, "reasons": res["reasons"], "symbol": res["metrics"]["symbol"]}
                 state["watch"].pop(mint, None)  # a failed safety gate is final
@@ -579,6 +601,8 @@ def scan_early(state: dict, pairs_by_mint: dict, cfg: dict, now: float, dry_run:
         if not ok:
             continue
         passed, hard, soft, facts = rugcheck_gate(mint, cfg, lane="early")
+        if hard == ["RugCheck report unavailable"]:
+            continue  # temporary: retry next scan
         if not passed:
             state["blocked"][mint] = {"at": now, "reasons": hard, "symbol": e["name"], "lane": "early"}
             state["alerted_early"][mint] = {"at": now, "mc": e["mc"], "blocked": True}  # don't recheck
@@ -639,7 +663,8 @@ def summarise() -> dict:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--loop", type=int, default=0, help="seconds between scans (always-on host)")
+    ap.add_argument("--loop", type=int, default=0, help="seconds between scans")
+    ap.add_argument("--max-minutes", type=float, default=0, help="stop looping after this many minutes")
     ap.add_argument("--check", metavar="MINT")
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--test-alert", action="store_true", help="send one test message to confirm Telegram works")
@@ -655,8 +680,15 @@ if __name__ == "__main__":
         sys.exit(0 if ok else 1)
     if args.summary:
         print(json.dumps(summarise(), indent=1)); sys.exit(0)
+    started = time.time()
+    scans = 0
     while True:
+        t0 = time.time()
         scan(cfg, dry_run=args.dry_run)
+        scans += 1
         if not args.loop:
             break
-        time.sleep(args.loop)
+        if args.max_minutes and (time.time() - started) / 60 >= args.max_minutes:
+            log(f"time budget reached after {scans} scans; exiting so state is saved")
+            break
+        time.sleep(max(5, args.loop - (time.time() - t0)))

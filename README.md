@@ -5,7 +5,7 @@ Free Telegram alerts for Pump.fun coins in two lanes, both behind a RugCheck saf
 - **🌱 Early:** low-cap coins still on the bonding curve ($8K to $45K) with broad, growing buyer demand. Earliest entry, highest risk.
 - **🎓 Graduated:** coins that just moved to PumpSwap ($20K to $150K) with real momentum. Later entry, but liquidity and LP lock are verifiable.
 
-A coin can alert in both lanes. An Early alert followed by a Graduated alert is confirmation. It runs on GitHub every 5 minutes. No servers, API keys or paid services.
+A coin can alert in both lanes. An Early alert followed by a Graduated alert is confirmation. It runs on GitHub, scanning every 60 seconds. No servers, API keys or paid services.
 
 **Setup time:** about 15 minutes. **Cost:** $0.
 
@@ -46,7 +46,7 @@ A coin can alert in both lanes. An Early alert followed by a Graduated alert is 
 
 1. Repo > **Actions** tab. If asked, click **I understand my workflows, go ahead and enable them**.
 2. Click **Graduation radar** in the left list > **Run workflow** > set mode to **test** > **Run workflow**.
-3. Within about a minute your bot should send: *"Pump.fun radar is connected."* If it does, you're live. It now scans every 5 minutes on its own.
+3. Within about a minute your bot should send: *"Pump.fun radar is connected."* If it does, you're live. It now scans every 60 seconds on its own.
 4. Optional: run it once more with mode **scan** and open the run. The log should show `discovery: +N watched` and `scan done`.
 
 A quiet chat is normal. Alerts only fire when a coin passes every rule, which may be a few times a day.
@@ -73,7 +73,7 @@ Each coin alerts once per lane. Every alert links to GMGN, RugCheck, Bubblemaps 
 ## Monitoring
 
 - **Daily:** read each alert, open the GMGN link, check Bundle % and dev history before acting.
-- **If alerts seem to stop:** Actions tab. Green runs every ~5 min = healthy. A red run: click it and read the `scan error:` line.
+- **If alerts seem to stop:** Actions tab. A healthy radar shows a run in progress (yellow) or recently finished (green); each run lasts about 5.5 hours. A red run: click it and read the `scan error:` line. Occasional `rate-limited, skipped` lines are normal.
 - **Keep it alive:** GitHub pauses scheduled workflows in a public repo after 60 days with no commits. Edit any file (even this README) once a month, or re-enable it from the Actions tab if you get the pause email.
 - **Score a coin manually** (needs Python on your computer): `python -m pipeline.grad_radar --check <CONTRACT_ADDRESS>` shows exactly which rules it passes or fails.
 
@@ -92,7 +92,7 @@ The scorecard that matters: of your Early alerts, how many went on to graduate? 
 
 ## Known limits
 
-- **Speed:** GitHub runs every 5 min at best and can lag at busy times. That matters most for the Early lane, where a coin can move from $10K to graduation in under an hour. If Early alerts keep arriving after the move, that is the signal to move to an always-on host. For faster alerts, run `python -m pipeline.grad_radar --loop 30` on an always-on host (~$5/month).
+- **Speed:** each GitHub run scans every 60 seconds for about 5.5 hours. GitHub starts new runs unreliably, so there can be gaps of up to a few hours between runs. If that costs you Early alerts, move to an always-on host (~$5/month) with `python -m pipeline.grad_radar --loop 30`.
 - **Coverage:** free GeckoTerminal feeds favor coins already showing momentum. It will not see every graduation.
 - **Safety:** RugCheck rules out contract-level traps, not holders dumping. Most Pump.fun coins never graduate, so treat Early alerts as small-size bets. Every alert is a lead to check, not advice.
 

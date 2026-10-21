@@ -66,6 +66,19 @@ def test_early_safety_dev_bag():
     assert any("dev holds" in s for s in soft)
 
 
+def test_rate_limit_is_not_a_block():
+    import urllib.error
+    orig = g.http_json
+    def limited(url, *a, **k):
+        raise g.RateLimited(url)
+    g.http_json = limited
+    try:
+        ok, hard, _, _ = g.rugcheck_gate("m", CFG)
+        assert not ok and hard == ["RugCheck report unavailable"]
+    finally:
+        g.http_json = orig
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
