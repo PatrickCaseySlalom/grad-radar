@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: grad-radar
+  group: grad-radar-${{ inputs.mode || 'scan' }}  # test runs never wait behind a scan
   cancel-in-progress: false
 
 jobs:
