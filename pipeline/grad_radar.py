@@ -564,6 +564,7 @@ def scan(cfg: dict, dry_run: bool = False) -> int:
                     delivered = True
                 else:
                     delivered = send_telegram(text)
+                log(f"ALERT grad {mint} {res['metrics']['symbol']} mc={res['metrics']['mc']:.0f} delivered={bool(delivered)}")
                 state["alerted"][mint] = {"at": now, "mc": res["metrics"]["mc"], "peak_mc": res["metrics"]["mc"],
                                           "symbol": res["metrics"]["symbol"], "delivered": bool(delivered)}
                 state["watch"].pop(mint, None)
@@ -616,6 +617,7 @@ def scan_early(state: dict, pairs_by_mint: dict, cfg: dict, now: float, dry_run:
             print(text); delivered = True
         else:
             delivered = send_telegram(text)
+        log(f"ALERT early {mint} {e['name']} mc={e['mc']:.0f} delivered={bool(delivered)}")
         state["alerted_early"][mint] = {"at": now, "mc": e["mc"], "peak_mc": e["mc"], "symbol": e["name"],
                                         "delivered": bool(delivered)}
         sent += 1
