@@ -1,5 +1,7 @@
 """Offline checks for the graduation radar. Run: python -m tests.test_grad_radar"""
+import contextlib
 import copy
+import io
 import json
 import time
 from pathlib import Path
@@ -77,6 +79,24 @@ def test_rate_limit_is_not_a_block():
         assert not ok and hard == ["RugCheck report unavailable"]
     finally:
         g.http_json = orig
+
+
+def test_outcome_logged_once_after_window():
+    cfg = dict(g.DEFAULTS)
+    now = 100 * 3600.0
+    state = {"alerted": {"G": {"at": 0, "mc": 50000, "peak_mc": 120000, "last_mc": 2000, "symbol": "GG"}},
+             "alerted_early": {"E": {"at": now - 60, "mc": 10000, "peak_mc": 10000, "symbol": "EE"},
+                               "B": {"at": 0, "mc": 9000, "blocked": True}}}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        g.track_outcomes(state, {}, cfg, now)
+    out = buf.getvalue()
+    assert "OUTCOME grad G GG alert_mc=50000 peak_mc=120000 last_mc=2000 peak_x=2.40 graduated=True" in out
+    assert "OUTCOME early" not in out  # still inside its window, and blocked entries are skipped
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        g.track_outcomes(state, {}, cfg, now + 60)
+    assert "OUTCOME" not in buf.getvalue()
 
 
 if __name__ == "__main__":

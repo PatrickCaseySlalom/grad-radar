@@ -7,8 +7,8 @@ grad_radar:
   early_max_age_minutes: 120         # coin age since launch
   early_min_market_cap: 8000         # USD
   early_max_market_cap: 45000        # stay well below graduation
-  early_min_unique_buyers_h1: 60     # distinct wallets, not trade count
-  early_min_buyers_15m: 20           # demand still active right now
+  early_min_unique_buyers_h1: 100    # distinct wallets, not trade count (60 in week 1: 85% never graduated)
+  early_min_buyers_15m: 35           # demand still active right now (was 20)
   early_min_buyer_seller_ratio: 1.3
   early_min_volume_h1: 5000
   early_max_drop_5m_pct: -15
@@ -23,10 +23,10 @@ grad_radar:
   min_market_cap: 20000
   max_market_cap: 150000
   min_liquidity_usd: 8000
-  min_liquidity_to_mc: 0.10          # exit depth
-  min_buys_since_graduation: 150
+  min_liquidity_to_mc: 0.15          # exit depth (was 0.10)
+  min_buys_since_graduation: 300     # was 150; week 1: 84% of grad alerts fell >90%
   min_buy_sell_ratio: 1.15
-  max_drop_5m_pct: -15
+  max_drop_5m_pct: -5                # was -15; skip coins already fading
   max_top10_pct: 30                  # excludes pools and AMMs
   max_single_holder_pct: 10
   min_lp_locked_pct: 90

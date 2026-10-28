@@ -521,8 +521,19 @@ def evaluate(mint: str, pairs: list[dict], cfg: dict, now: float, report: dict |
 
 def track_outcomes(state: dict, pairs_by_mint: dict, cfg: dict, now: float) -> None:
     """Log peak and latest MC after each alert so thresholds can be tuned from real data."""
+    window = cfg["track_hours"] * 3600
+    for lane, alerts in (("early", state.get("alerted_early", {})), ("grad", state["alerted"])):
+        for mint, a in alerts.items():
+            if a.get("blocked") or a.get("outcome_logged") or now - a["at"] <= window:
+                continue
+            # tracking window closed: write the final score once, so weekly reviews can read it from the logs
+            mc0 = a.get("mc") or 1
+            log(f"OUTCOME {lane} {mint} {a.get('symbol', '?')} alert_mc={mc0:.0f} "
+                f"peak_mc={a.get('peak_mc', mc0):.0f} last_mc={a.get('last_mc', 0):.0f} "
+                f"peak_x={a.get('peak_mc', mc0) / mc0:.2f} graduated={bool(a.get('graduated', lane == 'grad'))}")
+            a["outcome_logged"] = True
     for mint, a in state.get("alerted_early", {}).items():
-        if a.get("blocked") or now - a["at"] > cfg["track_hours"] * 3600:
+        if a.get("blocked") or now - a["at"] > window:
             continue
         pairs = pairs_by_mint.get(mint, [])
         if pairs:
