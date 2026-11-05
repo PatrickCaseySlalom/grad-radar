@@ -99,6 +99,55 @@ def test_outcome_logged_once_after_window():
     assert "OUTCOME" not in buf.getvalue()
 
 
+def test_holder_floor_waits_not_blocks():
+    r = copy.deepcopy(REPORT); r["totalHolders"] = 120
+    res = g.evaluate("mint", [pair()], CFG, time.time(), r)
+    assert res["status"] == "holders_wait", res
+
+
+def test_hold_test():
+    cfg = dict(CFG, confirm_minutes=10, confirm_max_drop_pct=-20, confirm_expire_minutes=30)
+    state, t = {}, 1000.0
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert g.confirm(state, "grad", "M", 50000, t, cfg) == (False, None)            # first pass
+        assert g.confirm(state, "grad", "M", 52000, t + 300, cfg)[0] is False            # too soon
+        ready, first = g.confirm(state, "grad", "M", 48000, t + 660, cfg)                # held 11m, -4%
+        assert ready and first["mc"] == 50000 and "grad:M" not in state["pending"]
+        g.confirm(state, "grad", "D", 50000, t, cfg)
+        assert g.confirm(state, "grad", "D", 35000, t + 660, cfg)[0] is False            # dumped 30%
+        assert "grad:D" not in state["pending"]
+        g.confirm(state, "grad", "X", 50000, t, cfg)
+        assert g.confirm(state, "grad", "X", 50000, t + 3600, cfg)[0] is False           # stale: restarts
+        assert state["pending"]["grad:X"]["at"] == t + 3600
+    assert g.confirm({}, "grad", "Z", 1, t, dict(cfg, confirm_minutes=0)) == (True, None)
+
+
+def test_early_needs_socials_holders_and_hold():
+    cfg = dict(CFG, early_require_socials=True, early_min_holders=150, confirm_minutes=10, early_max_top10_pct=30)
+    r = copy.deepcopy(REPORT); r["totalHolders"] = 400; r["creatorBalance"] = 0
+    orig_gate, orig_send = g.rugcheck_gate, g.send_telegram
+    g.rugcheck_gate = lambda mint, c, report=None, lane="grad": orig_gate(mint, c, r, lane)
+    try:
+        t = time.time()
+        def run(now, pairs, holders=400):
+            r["totalHolders"] = holders
+            state["watch"]["M"]["early"] = early(at=now)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                n = g.scan_early(state, {"M": pairs}, cfg, now, dry_run=True)
+            return n, buf.getvalue()
+        social = [{"dexId": "pumpfun", "info": {"socials": [{"type": "twitter"}]}}]
+        state = {"watch": {"M": {"name": "T"}}, "alerted_early": {}, "blocked": {}}
+        assert run(t, [])[0] == 0 and not state.get("pending")                  # no socials
+        assert run(t, social, holders=90)[0] == 0 and not state.get("pending")   # too few holders
+        assert run(t, social)[0] == 0 and "early:M" in state["pending"]          # first pass
+        n, out = run(t + 660, social)
+        assert n == 1 and "Held 11m" in out
+        assert "ALERT early M" in out and "holders=400" in out and "socials=1" in out and "first_mc=25000" in out
+    finally:
+        g.rugcheck_gate, g.send_telegram = orig_gate, orig_send
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

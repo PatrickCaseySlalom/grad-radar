@@ -16,7 +16,8 @@ grad_radar:
   early_max_top10_pct: 25            # stricter than graduated lane
   early_max_single_holder_pct: 8
   early_max_dev_pct: 5               # dev holding a big bag = dump risk
-  early_require_socials: false
+  early_require_socials: true       # week 2: X/site on 32% of winners vs 1% of rugs
+  early_min_holders: 150             # RugCheck total holders; below = wait, not block
 
   # ---- GRADUATED lane: just moved to PumpSwap -----------------------------
   max_minutes_since_graduation: 45
@@ -30,7 +31,13 @@ grad_radar:
   max_top10_pct: 30                  # excludes pools and AMMs
   max_single_holder_pct: 10
   min_lp_locked_pct: 90
-  require_socials: false
+  require_socials: true             # week 2: X/site on 45% of winners vs 9% of rugs
+  min_holders: 300                   # RugCheck total holders; below = wait, not block
+
+  # ---- Hold test: pass every check twice, 10+ min apart, without dumping
+  confirm_minutes: 10                # 0 = alert on first pass
+  confirm_max_drop_pct: -20          # MC drop between passes that cancels the alert
+  confirm_expire_minutes: 30         # older first pass starts over
 
   # ---- Shared RugCheck gates ----------------------------------------------
   max_insider_wallets: 0

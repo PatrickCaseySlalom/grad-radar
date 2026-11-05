@@ -94,6 +94,13 @@ DEFAULTS = {
     "early_max_single_holder_pct": 8,
     "early_max_dev_pct": 5,             # dev still holding a big bag = dump risk
     "early_require_socials": False,
+    # Anti-rug filters (week-2 review): holders are hard to fake, bot volume is not
+    "min_holders": 300,                 # RugCheck total holders, graduated lane
+    "early_min_holders": 150,           # RugCheck total holders, early lane
+    # Hold test: a coin must pass every check twice, this far apart, without dumping in between
+    "confirm_minutes": 10,              # 0 = alert on the first pass (old behaviour)
+    "confirm_max_drop_pct": -20,        # MC drop from first pass that cancels the alert
+    "confirm_expire_minutes": 30,       # first pass older than this starts over
     # Outcome log (feeds tuning)
     "track_hours": 24,
 }
@@ -289,7 +296,7 @@ def momentum_check(pair: dict, cfg: dict, now: float) -> tuple[bool, list[str], 
         "vol_1h": fnum(pair.get("volume", {}).get("h1")),
         "grad_min": (now * 1000 - fnum(pair.get("pairCreatedAt"), now * 1000)) / 60000,
         "quote": pair.get("quoteToken", {}).get("symbol", "?"),
-        "socials": len((pair.get("info") or {}).get("socials") or []) + len((pair.get("info") or {}).get("websites") or []),
+        "socials": has_socials([pair]),
         "pair_url": pair.get("url", ""),
         "name": pair.get("baseToken", {}).get("name", ""),
         "symbol": pair.get("baseToken", {}).get("symbol", ""),
@@ -516,7 +523,54 @@ def evaluate(mint: str, pairs: list[dict], cfg: dict, now: float, report: dict |
     passed, hard, soft, facts = rugcheck_gate(mint, cfg, report)
     if not passed:
         return {"status": "safety_fail", "reasons": hard, "metrics": m}
+    if facts.get("holders", 0) < cfg["min_holders"]:
+        return {"status": "holders_wait", "reasons": [f"{facts.get('holders', 0)} holders"], "metrics": m}
     return {"status": "alert", "metrics": m, "facts": facts, "soft": soft}
+
+
+def has_socials(pairs: list[dict]) -> int:
+    """Count of X/Telegram/website links on the coin's DexScreener profile."""
+    return max((len((p.get("info") or {}).get("socials") or []) + len((p.get("info") or {}).get("websites") or [])
+                for p in pairs), default=0)
+
+
+def confirm(state: dict, lane: str, mint: str, mc: float, now: float, cfg: dict) -> tuple[bool, dict | None]:
+    """Hold test. True once a coin has passed every check twice, confirm_minutes apart, without
+    dropping more than confirm_max_drop_pct in between. Returns (ready, first_pass)."""
+    if cfg["confirm_minutes"] <= 0:
+        return True, None
+    pending = state.setdefault("pending", {})
+    key = f"{lane}:{mint}"
+    first = pending.get(key)
+    if first is None or now - first["at"] > cfg["confirm_expire_minutes"] * 60:
+        pending[key] = {"at": now, "mc": mc}
+        log(f"PENDING {lane} {mint} mc={mc:.0f}")
+        return False, None
+    if mc < first["mc"] * (1 + cfg["confirm_max_drop_pct"] / 100):
+        pending.pop(key)
+        log(f"CONFIRM-FAIL {lane} {mint} mc={first['mc']:.0f}->{mc:.0f}")
+        return False, None
+    if now - first["at"] < cfg["confirm_minutes"] * 60:
+        return False, None
+    pending.pop(key)
+    return True, first
+
+
+def alert_features(facts: dict, soft: list[str], socials: int, first: dict | None, **extra) -> str:
+    """Key numbers at alert time, appended to the ALERT log line for later tuning."""
+    parts = [f"holders={facts.get('holders', 0)}", f"top10={facts.get('top10', 0):.1f}",
+             f"dev_pct={facts.get('dev_pct', 0):.1f}", f"socials={socials}",
+             f"cluster={any('cluster' in s for s in soft)}", f"flags={len(soft)}"]
+    parts += [f"{k}={v:.0f}" if isinstance(v, float) else f"{k}={v}" for k, v in extra.items()]
+    if first:
+        parts.append(f"first_mc={first['mc']:.0f}")
+    return " ".join(parts)
+
+
+def confirm_line(first: dict | None, mc: float, now: float) -> str:
+    if not first:
+        return ""
+    return f"⏱ Held {(now - first['at']) / 60:.0f}m: MC ${first['mc']:,.0f} → ${mc:,.0f}\n"
 
 
 def track_outcomes(state: dict, pairs_by_mint: dict, cfg: dict, now: float) -> None:
@@ -569,13 +623,19 @@ def scan(cfg: dict, dry_run: bool = False) -> int:
             if res["status"] == "not_graduated":
                 continue
             if res["status"] == "alert":
-                text = format_alert(mint, res["metrics"], res["facts"], res["soft"])
+                m = res["metrics"]
+                ready, first = confirm(state, "grad", mint, m["mc"], now, cfg)
+                if not ready:
+                    continue
+                text = confirm_line(first, m["mc"], now) + format_alert(mint, m, res["facts"], res["soft"])
                 if dry_run:
                     print(text)
                     delivered = True
                 else:
                     delivered = send_telegram(text)
-                log(f"ALERT grad {mint} {res['metrics']['symbol']} mc={res['metrics']['mc']:.0f} delivered={bool(delivered)}")
+                feats = alert_features(res["facts"], res["soft"], m["socials"], first, buys_h1=m["buys"],
+                                       sells_h1=m["sells"], liq=m["liq"], grad_min=m["grad_min"])
+                log(f"ALERT grad {mint} {m['symbol']} mc={m['mc']:.0f} delivered={bool(delivered)} {feats}")
                 state["alerted"][mint] = {"at": now, "mc": res["metrics"]["mc"], "peak_mc": res["metrics"]["mc"],
                                           "symbol": res["metrics"]["symbol"], "delivered": bool(delivered)}
                 state["watch"].pop(mint, None)
@@ -588,6 +648,9 @@ def scan(cfg: dict, dry_run: bool = False) -> int:
                 state["watch"].pop(mint, None)  # a failed safety gate is final
             elif res["metrics"]["grad_min"] > cfg["max_minutes_since_graduation"]:
                 state["watch"].pop(mint, None)  # window closed
+        # forget stale first passes
+        expire = cfg["confirm_expire_minutes"] * 60
+        state["pending"] = {k: v for k, v in state.get("pending", {}).items() if now - v["at"] <= expire}
         # keep the blocked log small
         state["blocked"] = dict(sorted(state["blocked"].items(), key=lambda kv: -kv[1]["at"])[:200])
         state["last_scan"], state["last_error"] = now, None
@@ -612,6 +675,9 @@ def scan_early(state: dict, pairs_by_mint: dict, cfg: dict, now: float, dry_run:
         ok, _ = early_check(e, cfg)
         if not ok:
             continue
+        socials = has_socials(pairs_by_mint.get(mint, []))
+        if cfg["early_require_socials"] and not socials:
+            continue  # no X / Telegram / website yet: retry next scan
         passed, hard, soft, facts = rugcheck_gate(mint, cfg, lane="early")
         if hard == ["RugCheck report unavailable"]:
             continue  # temporary: retry next scan
@@ -619,16 +685,19 @@ def scan_early(state: dict, pairs_by_mint: dict, cfg: dict, now: float, dry_run:
             state["blocked"][mint] = {"at": now, "reasons": hard, "symbol": e["name"], "lane": "early"}
             state["alerted_early"][mint] = {"at": now, "mc": e["mc"], "blocked": True}  # don't recheck
             continue
-        if cfg["early_require_socials"]:
-            pairs = pairs_by_mint.get(mint, [])
-            if not any((p.get("info") or {}).get("socials") for p in pairs):
-                continue
-        text = format_early_alert(mint, e, facts, soft)
+        if facts.get("holders", 0) < cfg["early_min_holders"]:
+            continue  # too few real holders yet: retry next scan
+        ready, first = confirm(state, "early", mint, e["mc"], now, cfg)
+        if not ready:
+            continue
+        text = confirm_line(first, e["mc"], now) + format_early_alert(mint, e, facts, soft)
         if dry_run:
             print(text); delivered = True
         else:
             delivered = send_telegram(text)
-        log(f"ALERT early {mint} {e['name']} mc={e['mc']:.0f} delivered={bool(delivered)}")
+        feats = alert_features(facts, soft, socials, first, buyers_h1=e["buyers_h1"], sellers_h1=e["sellers_h1"],
+                               buyers_15m=e["buyers_15m"], age_min=e["age_min"])
+        log(f"ALERT early {mint} {e['name']} mc={e['mc']:.0f} delivered={bool(delivered)} {feats}")
         state["alerted_early"][mint] = {"at": now, "mc": e["mc"], "peak_mc": e["mc"], "symbol": e["name"],
                                         "delivered": bool(delivered)}
         sent += 1
