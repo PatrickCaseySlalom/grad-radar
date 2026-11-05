@@ -32,10 +32,10 @@ grad_radar:
   max_single_holder_pct: 10
   min_lp_locked_pct: 90
   require_socials: true             # week 2: X/site on 45% of winners vs 9% of rugs
-  min_holders: 300                   # RugCheck total holders; below = wait, not block
+  min_holders: 200                   # RugCheck total holders; below = wait, not block (was 300)
 
-  # ---- Hold test: pass every check twice, 10+ min apart, without dumping
-  confirm_minutes: 10                # 0 = alert on first pass
+  # ---- Hold test: pass every check twice, 5+ min apart, without dumping
+  confirm_minutes: 5                 # 0 = alert on first pass (was 10)
   confirm_max_drop_pct: -20          # MC drop between passes that cancels the alert
   confirm_expire_minutes: 30         # older first pass starts over
 
