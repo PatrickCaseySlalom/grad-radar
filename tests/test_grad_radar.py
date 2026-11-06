@@ -148,6 +148,24 @@ def test_early_needs_socials_holders_and_hold():
         g.rugcheck_gate, g.send_telegram = orig_gate, orig_send
 
 
+def test_lookalike_names_blocked():
+    assert g.lookalike_name("St\u0435ve")            # Cyrillic e
+    assert not g.lookalike_name("Steve") and not g.lookalike_name("\ud76c\ub9dd\uc774")
+    p = pair(); p["baseToken"]["name"] = "St\u0435ve"
+    assert g.evaluate("mint", [p], CFG, time.time(), REPORT)["status"] == "momentum_fail"
+
+
+def test_metadata_socials_ignore_tweet_links():
+    orig = g.http_json
+    try:
+        g.http_json = lambda url, *a, **k: {"data": {"attributes": {"twitter_handle": "pipdotfun", "websites": ["https://x.fun"]}}}
+        assert g.metadata_socials("m") == 2
+        g.http_json = lambda url, *a, **k: {"data": {"attributes": {"twitter_handle": "someone/status/123", "websites": []}}}
+        assert g.metadata_socials("m") == 0
+    finally:
+        g.http_json = orig
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

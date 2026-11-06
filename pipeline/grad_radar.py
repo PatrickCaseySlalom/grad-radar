@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import json
+import re
 import os
 import sys
 import time
@@ -190,6 +191,8 @@ def discover(cfg: dict, state: dict) -> None:
         f"{GECKO}/networks/solana/dexes/pump-fun/pools?page=2&sort=h24_volume_usd_desc",
         f"{GECKO}/networks/solana/dexes/pumpswap/pools?page=1&sort=h24_volume_usd_desc",
         f"{GECKO}/networks/solana/dexes/pumpswap/pools?page=2&sort=h24_volume_usd_desc",
+        # fast movers: a coin that runs from launch to graduation in 30 min rarely tops 24h volume lists
+        f"{GECKO}/networks/solana/trending_pools?duration=5m&page=1",
     ]
     added = 0
     skipped = 0
@@ -245,6 +248,9 @@ def _early_snapshot(a: dict, now: float) -> dict:
         "chg_5m": fnum((a.get("price_change_percentage") or {}).get("m5")),
         "chg_1h": fnum((a.get("price_change_percentage") or {}).get("h1")),
         "vol_1h": fnum((a.get("volume_usd") or {}).get("h1")),
+        # $ per trade: bot wash trading = many tiny trades (logged for tuning)
+        "avg_trade": fnum((a.get("volume_usd") or {}).get("h1"))
+        / max(1, int(fnum(tx.get("h1", {}).get("buys"))) + int(fnum(tx.get("h1", {}).get("sells")))),
         "name": a.get("name", ""),
         "pool": a.get("address", ""),
     }
@@ -320,6 +326,8 @@ def momentum_check(pair: dict, cfg: dict, now: float) -> tuple[bool, list[str], 
         fails.append(f"5m {m['chg_5m']:.0f}%")
     if cfg["require_socials"] and not m["socials"]:
         fails.append("no socials")
+    if lookalike_name(m["name"]) or lookalike_name(m["symbol"]):
+        fails.append("look-alike name (mixed alphabets)")
     return (not fails), fails, m
 
 
@@ -424,7 +432,7 @@ def rugcheck_gate(mint: str, cfg: dict, report: dict | None = None,
     supply = fnum(token.get("supply"))
     dev_pct = 100 * fnum(report.get("creatorBalance")) / supply if supply else 0.0
     if fnum(report.get("creatorBalance")) == 0:
-        soft.append("dev wallet holds 0 (already exited)")
+        soft.append("dev sold launch bag (normal on Pump.fun, not a rug signal by itself)")
     elif early and dev_pct > cfg["early_max_dev_pct"]:
         hard.append(f"dev still holds {dev_pct:.1f}%")
     elif dev_pct > 0:
@@ -532,6 +540,32 @@ def has_socials(pairs: list[dict]) -> int:
     """Count of X/Telegram/website links on the coin's DexScreener profile."""
     return max((len((p.get("info") or {}).get("socials") or []) + len((p.get("info") or {}).get("websites") or [])
                 for p in pairs), default=0)
+
+
+def metadata_socials(mint: str) -> int:
+    """X / Telegram / website links from the coin's own launch metadata (GeckoTerminal token info).
+    Most bonding-curve coins never buy a DexScreener profile, so this is the main early-lane source.
+    A link to someone else's tweet (x.com/.../status/...) is not the project's own account and does not count."""
+    try:
+        a = (http_json(f"{GECKO}/networks/solana/tokens/{mint}/info") or {}).get("data", {}).get("attributes", {})
+    except RateLimited:
+        return 0
+    tw = (a.get("twitter_handle") or "").strip()
+    n = 1 if tw and "/status/" not in tw else 0
+    n += 1 if a.get("telegram_handle") else 0
+    n += len(a.get("websites") or [])
+    return n
+
+
+_SCRIPTS = (("LATIN", re.compile(r"[A-Za-z]")), ("CYRILLIC", re.compile(r"[\u0400-\u04FF]")),
+            ("GREEK", re.compile(r"[\u0370-\u03FF]")))
+
+
+def lookalike_name(name: str) -> bool:
+    """True when a name mixes Latin with Cyrillic/Greek letters (e.g. 'Stеve' with a Cyrillic е),
+    the classic trick for impersonating a real coin or trending name."""
+    found = {label for label, rx in _SCRIPTS if rx.search(name or "")}
+    return "LATIN" in found and len(found) > 1
 
 
 def confirm(state: dict, lane: str, mint: str, mc: float, now: float, cfg: dict) -> tuple[bool, dict | None]:
@@ -675,7 +709,13 @@ def scan_early(state: dict, pairs_by_mint: dict, cfg: dict, now: float, dry_run:
         ok, _ = early_check(e, cfg)
         if not ok:
             continue
+        if lookalike_name(e["name"]):
+            continue
         socials = has_socials(pairs_by_mint.get(mint, []))
+        if not socials and cfg["early_require_socials"]:
+            if "meta_socials" not in w or now - w.get("meta_checked", 0) > 600:
+                w["meta_socials"], w["meta_checked"] = metadata_socials(mint), now
+            socials = w["meta_socials"]
         if cfg["early_require_socials"] and not socials:
             continue  # no X / Telegram / website yet: retry next scan
         passed, hard, soft, facts = rugcheck_gate(mint, cfg, lane="early")
@@ -696,7 +736,8 @@ def scan_early(state: dict, pairs_by_mint: dict, cfg: dict, now: float, dry_run:
         else:
             delivered = send_telegram(text)
         feats = alert_features(facts, soft, socials, first, buyers_h1=e["buyers_h1"], sellers_h1=e["sellers_h1"],
-                               buyers_15m=e["buyers_15m"], age_min=e["age_min"])
+                               buyers_15m=e["buyers_15m"], age_min=e["age_min"], vol_1h=e["vol_1h"],
+                               avg_trade=e.get("avg_trade", 0.0))
         log(f"ALERT early {mint} {e['name']} mc={e['mc']:.0f} delivered={bool(delivered)} {feats}")
         state["alerted_early"][mint] = {"at": now, "mc": e["mc"], "peak_mc": e["mc"], "symbol": e["name"],
                                         "delivered": bool(delivered)}
