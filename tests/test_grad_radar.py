@@ -188,6 +188,44 @@ def test_grad_follow_up_only():
         g.evaluate, g.discover, g.dexscreener_pairs, g.load_state, g.save_state = orig_eval, orig_disc, orig_dex, orig_load, orig_save
 
 
+def test_exit_pings_once_and_first_exit():
+    cfg = dict(CFG)
+    now = time.time()
+    state = {"alerted": {}, "alerted_early": {
+        "W": {"at": now - 600, "mc": 10000, "peak_mc": 23000, "last_mc": 23000, "symbol": "WIN", "delivered": True},
+        "L": {"at": now - 600, "mc": 10000, "peak_mc": 11000, "last_mc": 5500, "symbol": "LOSE", "delivered": True}}}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        g.exit_pings(state, cfg, now, dry_run=True)
+        g.exit_pings(state, cfg, now + 60, dry_run=True)
+    out = buf.getvalue()
+    assert out.count("EXIT tp early W") == 1 and "WIN hit 2.3x" in out
+    assert out.count("EXIT stop early L") == 1 and "LOSE is down -45%" in out
+    assert state["alerted_early"]["W"]["first_exit"] == "tp" and state["alerted_early"]["L"]["first_exit"] == "stop"
+    state["alerted_early"]["W"]["last_mc"] = 4000                  # later stop does not change first_exit
+    with contextlib.redirect_stdout(io.StringIO()):
+        g.exit_pings(state, cfg, now + 120, dry_run=True)
+    assert state["alerted_early"]["W"]["first_exit"] == "tp" and state["alerted_early"]["W"]["stop_sent"]
+
+
+def test_buyer_concentration_and_grade():
+    trades = [{"attributes": {"kind": "buy", "volume_in_usd": "500", "tx_from_address": "BIG"}}] * 4 + \
+             [{"attributes": {"kind": "buy", "volume_in_usd": "2", "tx_from_address": f"w{i}"}} for i in range(20)] + \
+             [{"attributes": {"kind": "sell", "volume_in_usd": "900", "tx_from_address": "S"}}]
+    orig = g.http_json
+    g.http_json = lambda url, *a, **k: {"data": trades}
+    try:
+        c = g.buyer_concentration("pool")
+    finally:
+        g.http_json = orig
+    assert c["buy_wallets"] == 21 and c["top5_buy_pct"] > 98 and round(c["tiny_buy_pct"]) == 83
+    facts = {"holders": 500, "top10": 15}
+    assert g.grade("early", facts, [], 2, 60, {"top5_buy_pct": 20, "tiny_buy_pct": 5})[0] == "A"
+    assert g.grade("early", facts, [], 2, 60, c)[0] == "B"            # bundled-looking buying drags it down
+    assert g.grade("early", {"holders": 160, "top10": 24}, ["similar-size cluster: x"], 1, 10, c)[0] == "C"
+    assert g.grade_ok("B", {"min_grade": "B"}) and not g.grade_ok("C", {"min_grade": "B"})
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

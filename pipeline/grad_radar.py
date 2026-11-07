@@ -103,6 +103,12 @@ DEFAULTS = {
     "confirm_minutes": 10,              # 0 = alert on the first pass (old behaviour)
     "confirm_max_drop_pct": -20,        # MC drop from first pass that cancels the alert
     "confirm_expire_minutes": 30,       # first pass older than this starts over
+    # Exit pings on alerted coins (peaks are brief: most alerts die within 24h)
+    "exit_alerts": True,
+    "take_profit_x": 2.0,               # ping when MC reaches this multiple of the alert MC
+    "stop_loss_pct": -40,               # ping when MC falls this far below the alert MC
+    # Alert grade (A/B/C): provisional weights, retune from logged features after a week
+    "min_grade": "C",                   # lowest grade still sent to Telegram (A, B or C)
     # Outcome log (feeds tuning)
     "track_hours": 24,
 }
@@ -305,6 +311,7 @@ def momentum_check(pair: dict, cfg: dict, now: float) -> tuple[bool, list[str], 
         "quote": pair.get("quoteToken", {}).get("symbol", "?"),
         "socials": has_socials([pair]),
         "pair_url": pair.get("url", ""),
+        "pair": pair.get("pairAddress", ""),
         "name": pair.get("baseToken", {}).get("name", ""),
         "symbol": pair.get("baseToken", {}).get("symbol", ""),
     }
@@ -569,6 +576,62 @@ def lookalike_name(name: str) -> bool:
     return "LATIN" in found and len(found) > 1
 
 
+def buyer_concentration(pool: str) -> dict:
+    """From the pool's last ~300 trades: share of buy volume from the 5 biggest wallets, distinct buying
+    wallets, and the share of buys under $5 (bot dust). Bundled launches show a few wallets doing most of
+    the buying; research on 41K launches found bundled wallets held 36.5% of supply at graduation."""
+    if not pool:
+        return {}
+    try:
+        data = (http_json(f"{GECKO}/networks/solana/pools/{pool}/trades") or {}).get("data", [])
+    except RateLimited:
+        return {}
+    by_wallet: dict[str, float] = {}
+    buys = tiny = 0
+    for t in data:
+        a = t.get("attributes") or {}
+        if a.get("kind") != "buy":
+            continue
+        usd = fnum(a.get("volume_in_usd"))
+        buys += 1
+        tiny += usd < 5
+        w = a.get("tx_from_address") or "?"
+        by_wallet[w] = by_wallet.get(w, 0.0) + usd
+    total = sum(by_wallet.values())
+    if not buys or not total:
+        return {}
+    top5 = sum(sorted(by_wallet.values(), reverse=True)[:5])
+    return {"top5_buy_pct": 100 * top5 / total, "buy_wallets": len(by_wallet), "tiny_buy_pct": 100 * tiny / buys}
+
+
+def grade(lane: str, facts: dict, soft: list[str], socials: int, avg_trade: float, conc: dict) -> tuple[str, int]:
+    """Provisional A/B/C grade from signals that are costly to fake. Returns (grade, points)."""
+    pts = 0
+    pts += socials >= 2
+    pts += facts.get("holders", 0) >= (300 if lane == "early" else 1000)
+    pts += facts.get("top10", 100) <= 20
+    pts += avg_trade >= 40                       # fewer, larger trades = more human (graduation study)
+    pts -= any("cluster" in s for s in soft)
+    top5 = conc.get("top5_buy_pct")
+    if top5 is not None:
+        pts += top5 <= 25
+        pts -= top5 >= 50
+        pts -= conc.get("tiny_buy_pct", 0) >= 40
+    return ("A" if pts >= 4 else "B" if pts >= 2 else "C"), pts
+
+
+def grade_ok(g: str, cfg: dict) -> bool:
+    return "ABC".index(g) <= "ABC".index(str(cfg.get("min_grade", "C")).upper()[:1] or "C")
+
+
+def grade_line(g: str, pts: int, conc: dict) -> str:
+    label = {"A": "strong", "B": "mixed", "C": "weak"}[g]
+    bits = f"Grade {g} ({label}, {pts} pts)"
+    if conc:
+        bits += f" · top-5 wallets {conc['top5_buy_pct']:.0f}% of recent buys · {conc['buy_wallets']} buyers"
+    return bits + "\n"
+
+
 def confirm(state: dict, lane: str, mint: str, mc: float, now: float, cfg: dict) -> tuple[bool, dict | None]:
     """Hold test. True once a coin has passed every check twice, confirm_minutes apart, without
     dropping more than confirm_max_drop_pct in between. Returns (ready, first_pass)."""
@@ -608,7 +671,7 @@ def confirm_line(first: dict | None, mc: float, now: float) -> str:
     return f"⏱ Held {(now - first['at']) / 60:.0f}m: MC ${first['mc']:,.0f} → ${mc:,.0f}\n"
 
 
-def track_outcomes(state: dict, pairs_by_mint: dict, cfg: dict, now: float) -> None:
+def track_outcomes(state: dict, pairs_by_mint: dict, cfg: dict, now: float, dry_run: bool = False) -> None:
     """Log peak and latest MC after each alert so thresholds can be tuned from real data."""
     window = cfg["track_hours"] * 3600
     for lane, alerts in (("early", state.get("alerted_early", {})), ("grad", state["alerted"])):
@@ -619,7 +682,8 @@ def track_outcomes(state: dict, pairs_by_mint: dict, cfg: dict, now: float) -> N
             mc0 = a.get("mc") or 1
             log(f"OUTCOME {lane} {mint} {a.get('symbol', '?')} alert_mc={mc0:.0f} "
                 f"peak_mc={a.get('peak_mc', mc0):.0f} last_mc={a.get('last_mc', 0):.0f} "
-                f"peak_x={a.get('peak_mc', mc0) / mc0:.2f} graduated={bool(a.get('graduated', lane == 'grad'))}")
+                f"peak_x={a.get('peak_mc', mc0) / mc0:.2f} graduated={bool(a.get('graduated', lane == 'grad'))} "
+                f"first_exit={a.get('first_exit', 'none')} grade={a.get('grade', '?')}")
             a["outcome_logged"] = True
     for mint, a in state.get("alerted_early", {}).items():
         if a.get("blocked") or now - a["at"] > window:
@@ -637,6 +701,40 @@ def track_outcomes(state: dict, pairs_by_mint: dict, cfg: dict, now: float) -> N
             mc = fnum(pair.get("marketCap") or pair.get("fdv"))
             a["last_mc"] = mc
             a["peak_mc"] = max(a.get("peak_mc", 0), mc)
+    exit_pings(state, cfg, now, dry_run)
+
+
+def exit_pings(state: dict, cfg: dict, now: float, dry_run: bool = False) -> None:
+    """Once per alert: a take-profit ping at take_profit_x and a stop ping at stop_loss_pct.
+    The first one hit is recorded as first_exit so the weekly review can simulate P&L exactly."""
+    window = cfg["track_hours"] * 3600
+    for lane, alerts in (("early", state.get("alerted_early", {})), ("grad", state["alerted"])):
+        for mint, a in alerts.items():
+            if a.get("blocked") or now - a["at"] > window or not a.get("last_mc"):
+                continue
+            if lane == "grad" and mint in state.get("alerted_early", {}) \
+                    and not state["alerted_early"][mint].get("blocked"):
+                continue  # follow-up of an Early alert: the Early entry price is the one that matters
+            mc0, sym = a.get("mc") or 1, a.get("symbol", "?")
+            msgs = []
+            if not a.get("tp_sent") and a["peak_mc"] >= cfg["take_profit_x"] * mc0:
+                a["tp_sent"] = True
+                a.setdefault("first_exit", "tp")
+                msgs.append(("tp", f"🎯 {sym} hit {a['peak_mc'] / mc0:.1f}x: MC ${a['peak_mc']:,.0f} vs alert ${mc0:,.0f}.\n"
+                                   f"Most alerts give the move back within hours. Consider taking profit.\nCA: {mint}"))
+            if not a.get("stop_sent") and a["last_mc"] <= mc0 * (1 + cfg["stop_loss_pct"] / 100):
+                a["stop_sent"] = True
+                a.setdefault("first_exit", "stop")
+                msgs.append(("stop", f"🛑 {sym} is down {100 * (a['last_mc'] / mc0 - 1):.0f}% from the alert "
+                                     f"(${a['last_mc']:,.0f} vs ${mc0:,.0f}).\nCA: {mint}"))
+            for kind, text in msgs:
+                log(f"EXIT {kind} {lane} {mint} {sym} alert_mc={mc0:.0f} mc={a['peak_mc'] if kind == 'tp' else a['last_mc']:.0f}")
+                if not cfg.get("exit_alerts", True):
+                    continue
+                if dry_run:
+                    print(text)
+                elif a.get("delivered"):
+                    send_telegram(text)
 
 
 def scan(cfg: dict, dry_run: bool = False) -> int:
@@ -648,7 +746,7 @@ def scan(cfg: dict, dry_run: bool = False) -> int:
                    if not a.get("blocked") and now - a["at"] < cfg["track_hours"] * 3600]
         mints = list(dict.fromkeys(list(state["watch"]) + tracked))
         pairs_by_mint = dexscreener_pairs(mints)
-        track_outcomes(state, pairs_by_mint, cfg, now)
+        track_outcomes(state, pairs_by_mint, cfg, now, dry_run)
 
         sent = 0
         if cfg.get("early_enabled", True):
@@ -665,7 +763,15 @@ def scan(cfg: dict, dry_run: bool = False) -> int:
                 ready, first = confirm(state, "grad", mint, m["mc"], now, cfg)
                 if not ready:
                     continue
-                text = confirm_line(first, m["mc"], now) + format_alert(mint, m, res["facts"], res["soft"])
+                conc = buyer_concentration(m.get("pair", ""))
+                avg_trade = m["vol_1h"] / max(1, m["buys"] + m["sells"])
+                g_, pts = grade("grad", res["facts"], res["soft"], m["socials"], avg_trade, conc)
+                if not grade_ok(g_, cfg):
+                    log(f"SKIP grade {g_} grad {mint} mc={m['mc']:.0f}")
+                    state["watch"].pop(mint, None)
+                    continue
+                text = (grade_line(g_, pts, conc) + confirm_line(first, m["mc"], now)
+                        + format_alert(mint, m, res["facts"], res["soft"]))
                 if early_alert and not early_alert.get("blocked"):
                     text = (f"🔁 FOLLOW-UP: Early alert was at ${early_alert['mc']:,.0f} "
                             f"({m['mc'] / max(early_alert['mc'], 1):.1f}x since)\n") + text
@@ -675,10 +781,12 @@ def scan(cfg: dict, dry_run: bool = False) -> int:
                 else:
                     delivered = send_telegram(text)
                 feats = alert_features(res["facts"], res["soft"], m["socials"], first, buys_h1=m["buys"],
-                                       sells_h1=m["sells"], liq=m["liq"], grad_min=m["grad_min"])
+                                       sells_h1=m["sells"], liq=m["liq"], grad_min=m["grad_min"],
+                                       avg_trade=avg_trade, grade=g_, **conc)
                 log(f"ALERT grad {mint} {m['symbol']} mc={m['mc']:.0f} delivered={bool(delivered)} {feats}")
                 state["alerted"][mint] = {"at": now, "mc": res["metrics"]["mc"], "peak_mc": res["metrics"]["mc"],
-                                          "symbol": res["metrics"]["symbol"], "delivered": bool(delivered)}
+                                          "symbol": res["metrics"]["symbol"], "delivered": bool(delivered),
+                                          "grade": g_}
                 state["watch"].pop(mint, None)
                 sent += 1
                 time.sleep(1.2 if not dry_run else 0)
@@ -737,17 +845,23 @@ def scan_early(state: dict, pairs_by_mint: dict, cfg: dict, now: float, dry_run:
         ready, first = confirm(state, "early", mint, e["mc"], now, cfg)
         if not ready:
             continue
-        text = confirm_line(first, e["mc"], now) + format_early_alert(mint, e, facts, soft)
+        conc = buyer_concentration(e.get("pool", ""))
+        g_, pts = grade("early", facts, soft, socials, e.get("avg_trade", 0.0), conc)
+        if not grade_ok(g_, cfg):
+            log(f"SKIP grade {g_} early {mint} mc={e['mc']:.0f}")
+            state["alerted_early"][mint] = {"at": now, "mc": e["mc"], "blocked": True, "skipped_grade": g_}
+            continue
+        text = grade_line(g_, pts, conc) + confirm_line(first, e["mc"], now) + format_early_alert(mint, e, facts, soft)
         if dry_run:
             print(text); delivered = True
         else:
             delivered = send_telegram(text)
         feats = alert_features(facts, soft, socials, first, buyers_h1=e["buyers_h1"], sellers_h1=e["sellers_h1"],
                                buyers_15m=e["buyers_15m"], age_min=e["age_min"], vol_1h=e["vol_1h"],
-                               avg_trade=e.get("avg_trade", 0.0))
+                               avg_trade=e.get("avg_trade", 0.0), grade=g_, **conc)
         log(f"ALERT early {mint} {e['name']} mc={e['mc']:.0f} delivered={bool(delivered)} {feats}")
         state["alerted_early"][mint] = {"at": now, "mc": e["mc"], "peak_mc": e["mc"], "symbol": e["name"],
-                                        "delivered": bool(delivered)}
+                                        "delivered": bool(delivered), "grade": g_}
         sent += 1
         time.sleep(0 if dry_run else 1.2)
     return sent

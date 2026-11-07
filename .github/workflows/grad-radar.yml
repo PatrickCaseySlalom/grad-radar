@@ -34,8 +34,9 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # Remembers the watchlist and which coins already alerted, between runs
-      - uses: actions/cache@v4
+      # Remembers the watchlist and which coins already alerted, between runs.
+      # Restore and save are split so memory is saved even when a run is cancelled or killed.
+      - uses: actions/cache/restore@v4
         with:
           path: .radar
           key: grad-${{ github.run_id }}
@@ -54,3 +55,10 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+      - name: Save radar memory (runs even if the scan was cancelled)
+        if: ${{ always() && inputs.mode != 'test' && hashFiles('.radar/**') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .radar
+          key: grad-${{ github.run_id }}

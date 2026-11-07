@@ -40,6 +40,14 @@ grad_radar:
   confirm_max_drop_pct: -20          # MC drop between passes that cancels the alert
   confirm_expire_minutes: 30         # older first pass starts over
 
+  # ---- Exit pings on alerted coins (Telegram) --------------------------
+  exit_alerts: true
+  take_profit_x: 2.0                 # ping once when MC reaches 2x the alert MC
+  stop_loss_pct: -40                 # ping once when MC is 40% below the alert MC
+
+  # ---- Alert grade A/B/C (provisional weights; retune after a week of logs)
+  min_grade: C                       # lowest grade still sent: A, B or C
+
   # ---- Shared RugCheck gates ----------------------------------------------
   max_insider_wallets: 0
   block_on_danger_risk: true
