@@ -5,10 +5,10 @@ grad_radar:
   # ---- EARLY lane: pre-graduation, still on the bonding curve -------------
   early_enabled: true
   early_max_age_minutes: 120         # coin age since launch
-  early_min_market_cap: 8000         # USD
-  early_max_market_cap: 45000        # stay well below graduation
-  early_min_unique_buyers_h1: 100    # distinct wallets, not trade count (60 in week 1: 85% never graduated)
-  early_min_buyers_15m: 35           # demand still active right now (was 20)
+  early_min_market_cap: 6000         # USD (was 8000)
+  early_max_market_cap: 30000        # was 45000; coins graduate near $40K, so stay below it
+  early_min_unique_buyers_h1: 60     # distinct wallets (back from 100: socials/holders/hold test now screen rugs)
+  early_min_buyers_15m: 20           # demand still active right now (back from 35)
   early_min_buyer_seller_ratio: 1.3
   early_min_volume_h1: 5000
   early_max_drop_5m_pct: -15
@@ -20,6 +20,7 @@ grad_radar:
   early_min_holders: 150             # RugCheck total holders; below = wait, not block
 
   # ---- GRADUATED lane: just moved to PumpSwap -----------------------------
+  grad_follow_up_only: true          # graduated alerts only as follow-ups to Early alerts (no cold $75K+ entries)
   max_minutes_since_graduation: 45
   min_market_cap: 20000
   max_market_cap: 300000             # was 150000; fast movers (e.g. PIP) crossed $150K 6 min after graduating

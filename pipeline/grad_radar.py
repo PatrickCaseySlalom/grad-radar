@@ -61,6 +61,7 @@ DEFAULTS = {
     "watch_hours": 6,                   # drop a watched coin that has not graduated after this long
     # Graduation + momentum
     "max_minutes_since_graduation": 45,
+    "grad_follow_up_only": False,       # True = graduated alerts only for coins that already had an Early alert
     "min_market_cap": 20000,
     "max_market_cap": 150000,
     "min_liquidity_usd": 8000,
@@ -653,6 +654,9 @@ def scan(cfg: dict, dry_run: bool = False) -> int:
         if cfg.get("early_enabled", True):
             sent += scan_early(state, pairs_by_mint, cfg, now, dry_run)
         for mint in list(state["watch"]):
+            early_alert = state["alerted_early"].get(mint)
+            if cfg["grad_follow_up_only"] and (not early_alert or early_alert.get("blocked")):
+                continue  # graduated lane only follows up on coins the Early lane already flagged
             res = evaluate(mint, pairs_by_mint.get(mint, []), cfg, now)
             if res["status"] == "not_graduated":
                 continue
@@ -662,6 +666,9 @@ def scan(cfg: dict, dry_run: bool = False) -> int:
                 if not ready:
                     continue
                 text = confirm_line(first, m["mc"], now) + format_alert(mint, m, res["facts"], res["soft"])
+                if early_alert and not early_alert.get("blocked"):
+                    text = (f"🔁 FOLLOW-UP: Early alert was at ${early_alert['mc']:,.0f} "
+                            f"({m['mc'] / max(early_alert['mc'], 1):.1f}x since)\n") + text
                 if dry_run:
                     print(text)
                     delivered = True

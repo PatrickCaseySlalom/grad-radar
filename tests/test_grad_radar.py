@@ -166,6 +166,28 @@ def test_metadata_socials_ignore_tweet_links():
         g.http_json = orig
 
 
+def test_grad_follow_up_only():
+    cfg = dict(CFG, grad_follow_up_only=True, confirm_minutes=0, early_enabled=False)
+    calls = []
+    orig_eval, orig_disc, orig_dex, orig_load, orig_save = g.evaluate, g.discover, g.dexscreener_pairs, g.load_state, g.save_state
+    state = {"watch": {"A": {"first_seen": 0}, "B": {"first_seen": 0}}, "alerted": {}, "blocked": {},
+             "alerted_early": {"A": {"at": time.time(), "mc": 12000, "peak_mc": 12000, "symbol": "A"}},
+             "last_scan": None, "last_error": None}
+    def fake_eval(mint, pairs, c, now, report=None):
+        calls.append(mint)
+        p = pair(mc=60000); m = g.momentum_check(p, c, now)[2]
+        return {"status": "alert", "metrics": m, "facts": {"holders": 900}, "soft": []}
+    g.evaluate, g.discover, g.dexscreener_pairs = fake_eval, lambda c, s: None, lambda m: {}
+    g.load_state, g.save_state = lambda: state, lambda s: None
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert g.scan(cfg, dry_run=True) == 1
+        assert calls == ["A"] and "FOLLOW-UP: Early alert was at $12,000 (5.0x since)" in buf.getvalue()
+    finally:
+        g.evaluate, g.discover, g.dexscreener_pairs, g.load_state, g.save_state = orig_eval, orig_disc, orig_dex, orig_load, orig_save
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
